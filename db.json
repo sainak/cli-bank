@@ -1,0 +1,52 @@
+{
+	"aakash": {
+		"fullName": "Aakash Singh",
+		"username": "aakash",
+		"password": "A6xnQhbz4Vx2HuGl4lXwZ5U2I8iziLRFnhP5eNfIRvQ=",
+		"balance": 2845,
+		"lastLogin": "2023-01-11T10:09:20.231904245+05:30",
+		"transactions": [
+			{
+				"time": "2023-01-11T10:09:42.624309627+05:30",
+				"counterparty": "test",
+				"amount": 500,
+				"closingBalance": 2845,
+				"message": "transferred to test",
+				"type": "D"
+			},
+			{
+				"time": "2023-01-11T00:27:25.601420899+05:30",
+				"counterparty": "",
+				"amount": 2345,
+				"closingBalance": 3345,
+				"message": "credited via cash deposit",
+				"type": "C"
+			}
+		]
+	},
+	"test": {
+		"fullName": "Test account",
+		"username": "test",
+		"password": "A6xnQhbz4Vx2HuGl4lXwZ5U2I8iziLRFnhP5eNfIRvQ=",
+		"balance": 1500,
+		"lastLogin": "2023-01-11T10:09:54.567847244+05:30",
+		"transactions": [
+			{
+				"time": "2023-01-11T10:09:42.624309627+05:30",
+				"counterparty": "aakash",
+				"amount": 500,
+				"closingBalance": 1500,
+				"message": "received from aakash",
+				"type": "C"
+			}
+		]
+	},
+	"test3": {
+		"fullName": "Test account 3",
+		"username": "test3",
+		"password": "a1HUMd9dfxQcvs7M957fPdhhw7QGnwsRZho-76y7qRg=",
+		"balance": 1000,
+		"lastLogin": "0001-01-01T00:00:00Z",
+		"transactions": null
+	}
+}
