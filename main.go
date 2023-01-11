@@ -4,85 +4,47 @@ import (
 	"bufio"
 	"crypto/sha256"
 	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
+	"gorm.io/driver/sqlite"
+	"gorm.io/gorm"
+	"log"
 	"os"
-	"os/signal"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 )
 
+type Account struct {
+	ID        uint      `json:"ID" gorm:"primaryKey"`
+	FullName  string    `json:"fullName"`
+	Username  string    `json:"username" gorm:"unique;index"`
+	Password  string    `json:"password"`
+	Balance   float64   `json:"balance"`
+	LastLogin time.Time `json:"lastLogin"`
+	CreatedAt time.Time
+}
+
 type Transaction struct {
+	ID             uint      `json:"ID" gorm:"primaryKey"`
 	Time           time.Time `json:"time"`
 	Counterparty   string    `json:"counterparty"`
 	Amount         float64   `json:"amount"`
 	ClosingBalance float64   `json:"closingBalance"`
 	Message        string    `json:"message"`
 	Type           string    `json:"type"`
+	AccountID      uint
+	//Account        Account `gorm:"foreignKey:AccountID"`
 }
-
-type Account struct {
-	FullName     string        `json:"fullName"`
-	Username     string        `json:"username"`
-	Password     string        `json:"password"`
-	Balance      float64       `json:"balance"`
-	LastLogin    time.Time     `json:"lastLogin"`
-	Transactions []Transaction `json:"transactions"`
-}
-
-var bank = map[string]*Account{}
 
 var (
-	db                *os.File
+	db                *gorm.DB
 	dbErr             error
-	currentAccount    *Account
+	currentAccount    Account
 	previousLastLogin time.Time
 )
 
-func loadData() {
-	// set a manual lock on db
-	f, err := os.OpenFile("db.json.lock", os.O_CREATE|os.O_EXCL, 0)
-	if err != nil {
-		if os.IsExist(err) {
-			panic("database lock present, maybe an instance is already running?")
-		}
-		panic(err)
-	}
-	_ = f.Close()
-
-	db, dbErr = os.OpenFile("db.json", os.O_RDWR|os.O_CREATE, 0600)
-	if dbErr != nil {
-		panic(dbErr)
-	}
-	decode := json.NewDecoder(db)
-	err = decode.Decode(&bank)
-	if err != nil {
-		fmt.Println("error while decoding json", err)
-	}
-}
-
-func saveData() {
-	data, err := json.MarshalIndent(bank, "", "\t")
-	//fmt.Println(string(data))
-	if err != nil {
-		fmt.Println(err)
-		panic(err)
-	}
-	err = db.Truncate(0)
-	_, err = db.Seek(0, io.SeekStart)
-	_, err = db.Write(data)
-	if err != nil {
-		fmt.Println(err)
-		panic(err)
-	}
-	_ = db.Close()
-	_ = os.Remove("db.json.lock")
-}
-
+// helper to read string with spaces from the stdin buffer
 func readString(message string) string {
 	reader := bufio.NewReader(os.Stdin)
 	for {
@@ -97,6 +59,7 @@ func readString(message string) string {
 	}
 }
 
+// helper to ask for decisions
 func readYesNo(message string) bool {
 	reader := bufio.NewReader(os.Stdin)
 	for {
@@ -112,6 +75,7 @@ func readYesNo(message string) bool {
 	}
 }
 
+// helper to read positive float64 values from stdin buffer
 func readAmount() float64 {
 	for {
 		input := readString("Enter amount: ")
@@ -144,10 +108,15 @@ func hash(s string) string {
 
 func login() error {
 	username := readString("Enter username: ")
-	account, ok := bank[username]
-	if !ok {
-		return errors.New("user not found")
+	var account Account
+	err := db.Where("username = ?", username).First(&account).Error
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return errors.New("user not found")
+		}
+		log.Fatalln(err)
 	}
+
 	incorrectPasswordCount := 0
 	for {
 		password := readString("Enter password: ")
@@ -164,6 +133,10 @@ func login() error {
 	}
 	previousLastLogin = account.LastLogin
 	account.LastLogin = time.Now()
+	err = db.Save(&account).Error
+	if err != nil {
+		log.Fatalln(err)
+	}
 	currentAccount = account
 	fmt.Println("Hi, ", account.FullName)
 	return nil
@@ -173,15 +146,22 @@ func createAccount() {
 	username := readString("Enter username: ")
 
 	// sanity check
-	_, ok := bank[username]
-	if ok {
+	var exists bool
+	err := db.Model(Account{}).
+		Select("count(*) > 0").
+		Where("username = ?", username).
+		Find(&exists).Error
+	if err != nil {
+		log.Fatalln(err)
+	}
+	if exists {
 		fmt.Println("ERROR: account already taken")
 		return
 	}
 
-	account := &Account{
+	account := Account{
 		Username: username,
-		Balance:  1000, // joining bonus
+		Balance:  1000, // joining amount
 	}
 
 	account.FullName = readString("Enter your full name: ")
@@ -196,13 +176,20 @@ func createAccount() {
 		fmt.Println("ERROR: passwords do not match")
 	}
 	account.Password = hash(p1)
-	bank[username] = account
+	err = db.Create(&account).Error
+	if err != nil {
+		log.Fatalln(err)
+	}
 	fmt.Println("Account created successfully")
 	return
 }
 
 func listTransactions(start int, end int) {
-	transactions := currentAccount.Transactions
+	var transactions []Transaction
+	err := db.Where("account_id = ?", currentAccount.ID).Find(&transactions).Error
+	if err != nil {
+		log.Fatalln(err)
+	}
 	l := len(transactions)
 	if end == 0 {
 		end = l
@@ -229,71 +216,112 @@ func checkAccountInfo() {
 
 func depositCash() {
 	amount := readAmount()
-	currentAccount.Balance += amount
-	currentAccount.Transactions = append([]Transaction{{
-		Time:           time.Now(),
-		Amount:         amount,
-		ClosingBalance: currentAccount.Balance,
-		Message:        "credited via cash deposit",
-		Type:           "C",
-	}}, currentAccount.Transactions...)
+	err := db.Transaction(func(tx *gorm.DB) error {
+		currentAccount.Balance += amount
+		if err := tx.Save(&currentAccount).Error; err != nil {
+			return err
+		}
+		if err := tx.Create(&Transaction{
+			Time:           time.Now(),
+			Amount:         amount,
+			ClosingBalance: currentAccount.Balance,
+			Message:        "credited via cash deposit",
+			Type:           "C",
+			AccountID:      currentAccount.ID,
+		}).Error; err != nil {
+			return err
+		}
+		return nil
+	})
+	if err != nil {
+		log.Fatalln(err)
+	}
 	fmt.Printf("%.2f successfully deposited to your account\n", amount)
 	fmt.Println("Closing balance: ", currentAccount.Balance)
 }
 
 func withdrawCash() {
 	amount := readAmount()
-	currentAccount.Balance -= amount
-	currentAccount.Transactions = append([]Transaction{{
-		Time:           time.Now(),
-		Amount:         amount,
-		ClosingBalance: currentAccount.Balance,
-		Message:        "debited via cash withdrawal",
-		Type:           "D",
-	}}, currentAccount.Transactions...)
+	err := db.Transaction(func(tx *gorm.DB) error {
+		currentAccount.Balance -= amount
+		if err := tx.Save(&currentAccount).Error; err != nil {
+			return err
+		}
+		if err := tx.Create(&Transaction{
+			Time:           time.Now(),
+			Amount:         amount,
+			ClosingBalance: currentAccount.Balance,
+			Message:        "debited via cash withdrawal",
+			Type:           "D",
+			AccountID:      currentAccount.ID,
+		}).Error; err != nil {
+			return err
+		}
+		return nil
+	})
+	if err != nil {
+		log.Fatalln(err)
+	}
 	fmt.Printf("%.2f successfully withdrawn from your account\n", amount)
 	fmt.Println("Closing balance: ", currentAccount.Balance)
 }
 
 func transferMoney() {
+	var receiver Account
 	r := readString("Enter receiver's username:")
-
-	receiver, ok := bank[r]
-	if !ok {
-		fmt.Println("ERROR: receiver not found")
-		return
+	result := db.Where("username = ?", r).First(&receiver)
+	if result.Error != nil {
+		if errors.Is(result.Error, gorm.ErrRecordNotFound) {
+			fmt.Println("ERROR: receiver not found")
+			return
+		}
+		log.Fatalln(result.Error)
 	}
 
 	amount := readAmount()
-	if amount < 0 {
-		fmt.Println("ERROR: sending amount should be positive")
-		return
-	}
 	if currentAccount.Balance < amount {
 		fmt.Println("ERROR: insufficient funds")
 		return
 	}
 
 	currentTime := time.Now()
-	currentAccount.Balance -= amount
-	receiver.Balance += amount
-	currentAccount.Transactions = append([]Transaction{{
-		Time:           currentTime,
-		Counterparty:   receiver.Username,
-		Amount:         amount,
-		ClosingBalance: currentAccount.Balance,
-		Message:        fmt.Sprintf("transferred to %s", receiver.Username),
-		Type:           "D",
-	}}, currentAccount.Transactions...)
-	receiver.Transactions = append([]Transaction{{
-		Time:           currentTime,
-		Counterparty:   currentAccount.Username,
-		Amount:         amount,
-		ClosingBalance: receiver.Balance,
-		Message:        fmt.Sprintf("received from %s", currentAccount.Username),
-		Type:           "C",
-	}}, receiver.Transactions...)
 
+	err := db.Transaction(func(tx *gorm.DB) error {
+		currentAccount.Balance -= amount
+		receiver.Balance += amount
+		if err := tx.Save(&currentAccount).Error; err != nil {
+			return err
+		}
+		if err := tx.Save(&receiver).Error; err != nil {
+			return err
+		}
+		if err := tx.Create(&Transaction{
+			Time:           currentTime,
+			Counterparty:   receiver.Username,
+			Amount:         amount,
+			ClosingBalance: currentAccount.Balance,
+			Message:        fmt.Sprintf("transferred to %s", receiver.Username),
+			Type:           "D",
+			AccountID:      currentAccount.ID,
+		}).Error; err != nil {
+			return err
+		}
+		if err := tx.Create(&Transaction{
+			Time:           currentTime,
+			Counterparty:   currentAccount.Username,
+			Amount:         amount,
+			ClosingBalance: receiver.Balance,
+			Message:        fmt.Sprintf("received from %s", currentAccount.Username),
+			Type:           "C",
+			AccountID:      receiver.ID,
+		}).Error; err != nil {
+			return err
+		}
+		return nil
+	})
+	if err != nil {
+		log.Fatalln(err)
+	}
 	fmt.Printf("%.2f successfully sent to %s\n", amount, receiver.Username)
 	fmt.Println("Closing balance: ", currentAccount.Balance)
 }
@@ -305,7 +333,10 @@ func deleteAccount() (d bool) {
 	if yes2 := readYesNo("Are you sure you want to delete your account?: "); !yes2 {
 		return
 	}
-	delete(bank, currentAccount.Username)
+	err := db.Delete(&currentAccount).Error
+	if err != nil {
+		log.Fatalln(err)
+	}
 	return true
 }
 
@@ -354,16 +385,17 @@ func accountLoop() {
 }
 
 func main() {
-	loadData()
 
-	// catch keyboard interrupt to save data before exit
-	c := make(chan os.Signal)
-	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
-	go func() {
-		<-c
-		saveData()
-		os.Exit(1)
-	}()
+	db, dbErr = gorm.Open(sqlite.Open("db.sqlite"), &gorm.Config{})
+	if dbErr != nil {
+		panic("failed to connect database")
+	}
+
+	// Migrate the schema
+	err := db.AutoMigrate(&Account{}, &Transaction{})
+	if err != nil {
+		return
+	}
 
 	fmt.Printf("Welcome\n-------\n\n")
 
@@ -382,13 +414,10 @@ func main() {
 		case "2":
 			createAccount()
 		case "3":
-			saveData()
 			os.Exit(0)
 		default:
 			fmt.Println("Enter a valid choice")
 			continue
 		}
 	}
-
-	//todo convert error print statements to log
 }
