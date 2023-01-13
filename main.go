@@ -34,12 +34,12 @@ type Account struct {
 	Transactions []Transaction `json:"transactions"`
 }
 
-var bank = map[string]*Account{}
+var bank = map[string]Account{}
 
 var (
 	db                *os.File
 	dbErr             error
-	currentAccount    *Account
+	currentAccount    Account
 	previousLastLogin time.Time
 )
 
@@ -67,7 +67,7 @@ func loadData() {
 
 func saveData() {
 	data, err := json.MarshalIndent(bank, "", "\t")
-	//fmt.Println(string(data))
+	fmt.Println(string(data))
 	if err != nil {
 		fmt.Println(err)
 		panic(err)
@@ -179,7 +179,7 @@ func createAccount() {
 		return
 	}
 
-	account := &Account{
+	account := Account{
 		Username: username,
 		Balance:  1000, // joining bonus
 	}
